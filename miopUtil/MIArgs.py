@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
+import shlex
 
 # Mapping of flags to normalized names (both short and long forms)
 FLAG_MAPPING = {
@@ -120,6 +121,23 @@ def get_direction_str(forw):
         return "W"
     else:
         return "unknown"
+
+def ParseRunList(file_path):
+    convRunList = []
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+
+    for line in lines:
+        command_line = line.strip()
+        if command_line:
+            try:
+                args_list = shlex.split(command_line)
+                args = MIArgs.ParseParam(args_list[1:])
+                convRunList.append((args, args.in_data_type))
+
+            except Exception as e:
+                print(f"Error parsing command line: {command_line}\n{e}")
+    return convRunList
 
 
 @dataclass

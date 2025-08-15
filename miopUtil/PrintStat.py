@@ -1,6 +1,11 @@
 import threading
 print_lock = threading.Lock()
 
+def safe_print(*args, **kwargs):
+    """Thread-safe print function"""
+    with print_lock:
+        print(*args, **kwargs)
+
 def get_tensor_storage_bytes(tensor):
     return tensor.untyped_storage().nbytes()
 

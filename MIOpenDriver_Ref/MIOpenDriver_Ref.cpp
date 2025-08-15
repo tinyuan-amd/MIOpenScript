@@ -29,16 +29,20 @@ torch::Tensor gpu_convolution_reference(
     int64_t operation,
     std::string type)
 {
-    // Validate inputs
-    if (output.dim() != 4 || weight.dim() != 4 || input.dim() != 4)
-    {
-        throw std::invalid_argument("Expected 4D tensors for output / weight / input");
+    // Validate tensor dimensions (support both 4D and 5D)
+    bool is_3d = false;
+    if (input.dim() == 5 && weight.dim() == 5 && output.dim() == 5) {
+        is_3d = true;
+    } else if (input.dim() == 4 && weight.dim() == 4 && output.dim() == 4) {
+        is_3d = false;
+    } else {
+        throw std::invalid_argument("Expected either all 4D tensors (2D conv) or all 5D tensors (3D conv)");
     }
 
     // Check if tensors are on GPU
-    if (!output.is_cuda() || !weight.is_cuda())
+    if (!output.is_cuda() || !weight.is_cuda() || !input.is_cuda())
     {
-        throw std::runtime_error("Tensors must be on CUDA device for MIOpen");
+        throw std::runtime_error("All tensors must be on CUDA device for MIOpen");
     }
 
     // Initialize MIOpen handle
@@ -69,11 +73,12 @@ torch::Tensor gpu_convolution_reference(
             throw std::runtime_error("Failed to create input descriptor");
         }
 
-        // Ensure tensors are contiguous and float type
+        // Ensure tensors are contiguous
         auto output_contiguous = output.contiguous();
         auto weight_contiguous = weight.contiguous();
         auto input_contiguous = input.contiguous();
 
+        // Determine data type
         miopenDataType_t data_type = miopenFloat;
         if (type == "fp16")
         {
@@ -88,29 +93,100 @@ torch::Tensor gpu_convolution_reference(
             data_type = miopenInt8;
         }
 
-        // Set tensor descriptors
-        status = miopenSet4dTensorDescriptor(output_desc, data_type,
-                                             output_contiguous.size(0), output_contiguous.size(1),
-                                             output_contiguous.size(2), output_contiguous.size(3));
-        if (status != miopenStatusSuccess)
-        {
-            throw std::runtime_error("Failed to set output descriptor");
-        }
+        // Set tensor descriptors based on dimensionality
+        if (is_3d) {
+            // For 3D convolution, use 5D tensor descriptors
+            std::vector<int> output_dims = {
+                static_cast<int>(output_contiguous.size(0)), // N
+                static_cast<int>(output_contiguous.size(1)), // C
+                static_cast<int>(output_contiguous.size(2)), // D
+                static_cast<int>(output_contiguous.size(3)), // H
+                static_cast<int>(output_contiguous.size(4))  // W
+            };
+            std::vector<int> output_strides = {
+                static_cast<int>(output_contiguous.stride(0)),
+                static_cast<int>(output_contiguous.stride(1)),
+                static_cast<int>(output_contiguous.stride(2)),
+                static_cast<int>(output_contiguous.stride(3)),
+                static_cast<int>(output_contiguous.stride(4))
+            };
 
-        status = miopenSet4dTensorDescriptor(weight_desc, data_type,
-                                             weight_contiguous.size(0), weight_contiguous.size(1),
-                                             weight_contiguous.size(2), weight_contiguous.size(3));
-        if (status != miopenStatusSuccess)
-        {
-            throw std::runtime_error("Failed to set weight descriptor");
-        }
+            status = miopenSetTensorDescriptor(output_desc, data_type, 5, 
+                                             output_dims.data(), output_strides.data());
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to set 5D output descriptor");
+            }
 
-        status = miopenSet4dTensorDescriptor(input_desc, data_type,
-                                             input_contiguous.size(0), input_contiguous.size(1),
-                                             input_contiguous.size(2), input_contiguous.size(3));
-        if (status != miopenStatusSuccess)
-        {
-            throw std::runtime_error("Failed to set input descriptor");
+            std::vector<int> weight_dims = {
+                static_cast<int>(weight_contiguous.size(0)), // Out channels
+                static_cast<int>(weight_contiguous.size(1)), // In channels per group
+                static_cast<int>(weight_contiguous.size(2)), // D
+                static_cast<int>(weight_contiguous.size(3)), // H
+                static_cast<int>(weight_contiguous.size(4))  // W
+            };
+            std::vector<int> weight_strides = {
+                static_cast<int>(weight_contiguous.stride(0)),
+                static_cast<int>(weight_contiguous.stride(1)),
+                static_cast<int>(weight_contiguous.stride(2)),
+                static_cast<int>(weight_contiguous.stride(3)),
+                static_cast<int>(weight_contiguous.stride(4))
+            };
+
+            status = miopenSetTensorDescriptor(weight_desc, data_type, 5,
+                                             weight_dims.data(), weight_strides.data());
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to set 5D weight descriptor");
+            }
+
+            std::vector<int> input_dims = {
+                static_cast<int>(input_contiguous.size(0)), // N
+                static_cast<int>(input_contiguous.size(1)), // C
+                static_cast<int>(input_contiguous.size(2)), // D
+                static_cast<int>(input_contiguous.size(3)), // H
+                static_cast<int>(input_contiguous.size(4))  // W
+            };
+            std::vector<int> input_strides = {
+                static_cast<int>(input_contiguous.stride(0)),
+                static_cast<int>(input_contiguous.stride(1)),
+                static_cast<int>(input_contiguous.stride(2)),
+                static_cast<int>(input_contiguous.stride(3)),
+                static_cast<int>(input_contiguous.stride(4))
+            };
+
+            status = miopenSetTensorDescriptor(input_desc, data_type, 5,
+                                             input_dims.data(), input_strides.data());
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to set 5D input descriptor");
+            }
+
+        } else {
+            // For 2D convolution, use 4D tensor descriptors (existing code)
+            status = miopenSet4dTensorDescriptor(output_desc, data_type,
+                                               output_contiguous.size(0), output_contiguous.size(1),
+                                               output_contiguous.size(2), output_contiguous.size(3));
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to set 4D output descriptor");
+            }
+
+            status = miopenSet4dTensorDescriptor(weight_desc, data_type,
+                                               weight_contiguous.size(0), weight_contiguous.size(1),
+                                               weight_contiguous.size(2), weight_contiguous.size(3));
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to set 4D weight descriptor");
+            }
+
+            status = miopenSet4dTensorDescriptor(input_desc, data_type,
+                                               input_contiguous.size(0), input_contiguous.size(1),
+                                               input_contiguous.size(2), input_contiguous.size(3));
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to set 4D input descriptor");
+            }
         }
 
         // Create convolution descriptor
@@ -121,12 +197,29 @@ torch::Tensor gpu_convolution_reference(
             throw std::runtime_error("Failed to create convolution descriptor");
         }
 
-        status = miopenInitConvolutionDescriptor(conv_desc, miopenConvolution,
-                                                 padding, padding, stride, stride,
-                                                 dilation, dilation);
-        if (status != miopenStatusSuccess)
-        {
-            throw std::runtime_error("Failed to initialize convolution descriptor");
+        // Initialize convolution descriptor based on dimensionality
+        if (is_3d) {
+            // For 3D convolution, use ND descriptor
+            std::vector<int> pads = {padding, padding, padding};
+            std::vector<int> strides = {stride, stride, stride};
+            std::vector<int> dilations = {dilation, dilation, dilation};
+
+            status = miopenInitConvolutionNdDescriptor(conv_desc, 3, pads.data(), 
+                                                     strides.data(), dilations.data(), 
+                                                     miopenConvolution);
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to initialize 3D convolution descriptor");
+            }
+        } else {
+            // For 2D convolution (existing code)
+            status = miopenInitConvolutionDescriptor(conv_desc, miopenConvolution,
+                                                   padding, padding, stride, stride,
+                                                   dilation, dilation);
+            if (status != miopenStatusSuccess)
+            {
+                throw std::runtime_error("Failed to initialize 2D convolution descriptor");
+            }
         }
 
         status = miopenSetConvolutionGroupCount(conv_desc, group);
@@ -135,40 +228,66 @@ torch::Tensor gpu_convolution_reference(
             throw std::runtime_error("Failed to set convolution groupCount");
         }
 
-        // Create output tensor with proper device and type
-        // auto grad_input = torch::empty(input_shape,
-        //                                torch::TensorOptions()
-        //                                    .dtype(torch::kFloat32)
-        //                                    .device(grad_output.device()));
-
         // Print tensor info for debugging
 #if LOG_ENABLE
-        printf("output shape: [%ld, %ld, %ld, %ld]\n",
-               output_contiguous.size(0), output_contiguous.size(1),
-               output_contiguous.size(2), output_contiguous.size(3));
-        printf("weight shape: [%ld, %ld, %ld, %ld]\n",
-               weight_contiguous.size(0), weight_contiguous.size(1),
-               weight_contiguous.size(2), weight_contiguous.size(3));
-        printf("input shape: [%ld, %ld, %ld, %ld]\n",
-               input_contiguous.size(0), input_contiguous.size(1),
-               input_contiguous.size(2), input_contiguous.size(3));
+        if (is_3d) {
+            printf("3D Convolution - output shape: [%ld, %ld, %ld, %ld, %ld]\n",
+                   output_contiguous.size(0), output_contiguous.size(1),
+                   output_contiguous.size(2), output_contiguous.size(3), output_contiguous.size(4));
+            printf("3D Convolution - weight shape: [%ld, %ld, %ld, %ld, %ld]\n",
+                   weight_contiguous.size(0), weight_contiguous.size(1),
+                   weight_contiguous.size(2), weight_contiguous.size(3), weight_contiguous.size(4));
+            printf("3D Convolution - input shape: [%ld, %ld, %ld, %ld, %ld]\n",
+                   input_contiguous.size(0), input_contiguous.size(1),
+                   input_contiguous.size(2), input_contiguous.size(3), input_contiguous.size(4));
+        } else {
+            printf("2D Convolution - output shape: [%ld, %ld, %ld, %ld]\n",
+                   output_contiguous.size(0), output_contiguous.size(1),
+                   output_contiguous.size(2), output_contiguous.size(3));
+            printf("2D Convolution - weight shape: [%ld, %ld, %ld, %ld]\n",
+                   weight_contiguous.size(0), weight_contiguous.size(1),
+                   weight_contiguous.size(2), weight_contiguous.size(3));
+            printf("2D Convolution - input shape: [%ld, %ld, %ld, %ld]\n",
+                   input_contiguous.size(0), input_contiguous.size(1),
+                   input_contiguous.size(2), input_contiguous.size(3));
+        }
 #endif
 
         // Get workspace size first
         size_t workspace_size = 0;
-        status = miopenConvolutionBackwardDataGetWorkSpaceSize(
-            handle, output_desc, weight_desc, conv_desc, input_desc, &workspace_size);
+        if (operation == 1) {
+            // Forward
+            status = miopenConvolutionForwardGetWorkSpaceSize(
+                handle, weight_desc, input_desc, conv_desc, output_desc, &workspace_size);
+        } else if (operation == 2) {
+            // Backward data
+            status = miopenConvolutionBackwardDataGetWorkSpaceSize(
+                handle, output_desc, weight_desc, conv_desc, input_desc, &workspace_size);
+        } else if (operation == 4) {
+            // Backward weights
+            status = miopenConvolutionBackwardWeightsGetWorkSpaceSize(
+                handle, output_desc, input_desc, conv_desc, weight_desc, &workspace_size);
+        }
+
+        if (status != miopenStatusSuccess)
+        {
+            throw std::runtime_error("Failed to get workspace size");
+        }
 
         void *workspace = nullptr;
         if (workspace_size > 0)
         {
-            hipMalloc(&workspace, workspace_size);
+            hipError_t hip_status = hipMalloc(&workspace, workspace_size);
+            if (hip_status != hipSuccess)
+            {
+                throw std::runtime_error("Failed to allocate workspace memory");
+            }
         }
 
-        // Call MIOpen backward data convolution with proper error checking
-        if (operation == 1)
+        // Perform convolution operations based on operation type and data type
+        if (operation == 1) // Forward
         {
-
+            solution_id = 85;
             if (data_type == miopenFloat)
             {
                 status = miopenConvolutionForwardImmediate(
@@ -177,7 +296,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<float>(),
                     conv_desc,
                     output_desc, output_contiguous.data_ptr<float>(),
-                    workspace, workspace_size, 85);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenHalf)
             {
@@ -187,7 +306,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<c10::Half>(),
                     conv_desc,
                     output_desc, output_contiguous.data_ptr<c10::Half>(),
-                    workspace, workspace_size, 85);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenBFloat16)
             {
@@ -197,7 +316,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<c10::BFloat16>(),
                     conv_desc,
                     output_desc, output_contiguous.data_ptr<c10::BFloat16>(),
-                    workspace, workspace_size, 85);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenInt8)
             {
@@ -207,7 +326,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<int8_t>(),
                     conv_desc,
                     output_desc, output_contiguous.data_ptr<int8_t>(),
-                    workspace, workspace_size, 85);
+                    workspace, workspace_size, solution_id);
             }
 
             if (status != miopenStatusSuccess)
@@ -215,8 +334,9 @@ torch::Tensor gpu_convolution_reference(
                 throw std::runtime_error("MIOpen forward convolution failed with status: " + std::to_string(status));
             }
         }
-        else if (operation == 2)
+        else if (operation == 2) // Backward data
         {
+             solution_id = 86;
             if (data_type == miopenFloat)
             {
                 status = miopenConvolutionBackwardDataImmediate(
@@ -225,7 +345,7 @@ torch::Tensor gpu_convolution_reference(
                     weight_desc, weight_contiguous.data_ptr<float>(),
                     conv_desc,
                     input_desc, input_contiguous.data_ptr<float>(),
-                    workspace, workspace_size, 86);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenHalf)
             {
@@ -235,7 +355,7 @@ torch::Tensor gpu_convolution_reference(
                     weight_desc, weight_contiguous.data_ptr<c10::Half>(),
                     conv_desc,
                     input_desc, input_contiguous.data_ptr<c10::Half>(),
-                    workspace, workspace_size, 86);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenBFloat16)
             {
@@ -245,7 +365,7 @@ torch::Tensor gpu_convolution_reference(
                     weight_desc, weight_contiguous.data_ptr<c10::BFloat16>(),
                     conv_desc,
                     input_desc, input_contiguous.data_ptr<c10::BFloat16>(),
-                    workspace, workspace_size, 86);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenInt8)
             {
@@ -255,7 +375,7 @@ torch::Tensor gpu_convolution_reference(
                     weight_desc, weight_contiguous.data_ptr<int8_t>(),
                     conv_desc,
                     input_desc, input_contiguous.data_ptr<int8_t>(),
-                    workspace, workspace_size, 86);
+                    workspace, workspace_size, solution_id);
             }
 
             if (status != miopenStatusSuccess)
@@ -263,8 +383,9 @@ torch::Tensor gpu_convolution_reference(
                 throw std::runtime_error("MIOpen backward data convolution failed with status: " + std::to_string(status));
             }
         }
-        else if (operation == 4)
+        else if (operation == 4) // Backward weights
         {
+            solution_id = 87;
             if (data_type == miopenFloat)
             {
                 status = miopenConvolutionBackwardWeightsImmediate(
@@ -273,7 +394,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<float>(),
                     conv_desc,
                     weight_desc, weight_contiguous.data_ptr<float>(),
-                    workspace, workspace_size, 87);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenHalf)
             {
@@ -283,7 +404,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<c10::Half>(),
                     conv_desc,
                     weight_desc, weight_contiguous.data_ptr<c10::Half>(),
-                    workspace, workspace_size, 87);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenBFloat16)
             {
@@ -293,7 +414,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<c10::BFloat16>(),
                     conv_desc,
                     weight_desc, weight_contiguous.data_ptr<c10::BFloat16>(),
-                    workspace, workspace_size, 87);
+                    workspace, workspace_size, solution_id);
             }
             else if (data_type == miopenInt8)
             {
@@ -303,7 +424,7 @@ torch::Tensor gpu_convolution_reference(
                     input_desc, input_contiguous.data_ptr<int8_t>(),
                     conv_desc,
                     weight_desc, weight_contiguous.data_ptr<int8_t>(),
-                    workspace, workspace_size, 87);
+                    workspace, workspace_size, solution_id);
             }
 
             if (status != miopenStatusSuccess)
@@ -313,7 +434,7 @@ torch::Tensor gpu_convolution_reference(
         }
         else
         {
-            throw std::runtime_error("The Operation is set error[Forward-0 / BackwardData-2 / BackwardWeight-4]");
+            throw std::runtime_error("Invalid operation type. Expected: 1 (Forward), 2 (BackwardData), 4 (BackwardWeight)");
         }
 
         // Clean up workspace
@@ -324,13 +445,12 @@ torch::Tensor gpu_convolution_reference(
 
         // Cleanup descriptors
         miopenDestroyConvolutionDescriptor(conv_desc);
-
         miopenDestroyTensorDescriptor(output_desc);
         miopenDestroyTensorDescriptor(weight_desc);
         miopenDestroyTensorDescriptor(input_desc);
-
         miopenDestroy(handle);
 
+        // Return the appropriate tensor based on operation
         if (operation == 1)
         {
             return output_contiguous;

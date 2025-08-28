@@ -135,9 +135,9 @@ class ConvolutionRunner:
         
         if torch.cuda.is_available() and self.device.type == 'cuda':
             with torch.cuda.stream(self.stream):
-                input_data = torch.randn(shape, dtype=self.dtype, device='cpu', requires_grad=True)
-                input_data = input_data.to(self.device, non_blocking=True)
-                self.stream.synchronize()
+                input_data = torch.randn(shape, dtype=self.dtype, device=self.device, requires_grad=True)
+                # input_data = input_data.to(self.device, non_blocking=True)
+                # self.stream.synchronize()
         else:
             input_data = torch.randn(shape, dtype=self.dtype, device=self.device, requires_grad=True)
         return input_data
